@@ -1,0 +1,4 @@
+*.o
+9client
+core
+*.log
