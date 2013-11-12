@@ -19,19 +19,26 @@ static int cmd_write(int argc, char **argv);
 static int cmd_write_fid(int argc, char **argv);
 static int cmd_xwrite(int argc, char **argv);
 static int cmd_read(int argc, char **argv);
+static int cmd_ls(int argc, char **argv);
+static int cmd_quit(int argc, char **argv);
 
 struct cmd {
   char *s;
   int (*fn)(int argc, char **argv);
   char *help;
 } cmds[] = {
-  {"root", cmd_root, "— returns root fid"},
+  {"read", cmd_read, "<path>"},
+  {"write", cmd_write, "<path> <n>\\n<n bytes of data>"},
+  {"write_fid", cmd_write_fid, "<fid> <n>\\n<n bytes of data>"},
+  {"xwrite", cmd_xwrite, "<path> <data>"},
   {"walk", cmd_walk, "<path> — prints fid of destination or -1 on error"},
   {"mkdir", cmd_mkdir, "<path>"},
-  {"write", cmd_write, "<path>"},
-  {"write_fid", cmd_write_fid, "<fid>"},
-  {"xwrite", cmd_xwrite, "<path> <data>"},
-  {"read", cmd_read, "<path>"},
+  {"root", cmd_root, "— returns root fid"},
+  {"ls", cmd_ls, "<path>"},
+  {"quit", cmd_quit},
+  {"exit", cmd_quit},
+  {"q", cmd_quit},
+  {"x", cmd_quit},
   {0}
 };
 
@@ -41,11 +48,15 @@ static char *res = "";
 static char *user = "nobody";
 static char *host = 0;
 static struct p9_conn *conn = 0;
+static int running;
 
 static int
 cmd_root(int argc, char **argv)
 {
-  printf("%d\n", p9_root_fid(conn));
+  char buf[10];
+  int n;
+  n = snprintf(buf, sizeof(buf), "%d", p9_root_fid(conn));
+  printf("%d:%s\n", n, buf);
   return 0;
 }
 
@@ -58,47 +69,151 @@ cmd_walk(int argc, char **argv)
 static int
 cmd_mkdir(int argc, char **argv)
 {
+  int perm = 0700;
+
+  if (argc < 2)
+    goto err;
+  if (argc > 2 && sscanf(argv[3], "%o", &perm) != 1)
+    goto err;
+  if (p9_mkdir(argv[1], perm, conn))
+    goto err;
+  puts("ok");
   return 0;
+err:
+  puts("err");
+  return -1;
 }
 
 static int
 cmd_write(int argc, char **argv)
 {
+  P9_file *f;
+  int n, size, w, written = 0;
+  char buf[1024];
+  if (argc < 3 || sscanf(argv[2], "%d", &size) != 1)
+    goto err;
+  f = p9_open(argv[1], P9_OWRITE, -1, conn);
+  if (!f)
+    goto err;
+  while (written < size) {
+    n = fread(buf, sizeof(buf), 1, stdin);
+    w = p9_write(n, buf, f);
+    if (w < 0)
+      break;
+    written += w;
+  }
+  n = snprintf(buf, sizeof(buf), "%d", written);
+  printf("%d:%s\n", n, buf);
+  p9_close(f);
   return 0;
+err:
+  puts("err");
+  return -1;
 }
 
 static int
 cmd_xwrite(int argc, char **argv)
 {
+  P9_file *f;
+  int n;
+  char buf[10];
+
+  if (argc < 3)
+    goto err;
+  f = p9_open(argv[1], P9_OWRITE, -1, conn);
+  if (!f)
+    goto err;
+  n = p9_write(strlen(argv[2]), argv[2], f);
+  n = snprintf(buf, sizeof(buf), "%d", n);
+  printf("%d:%s\n", n, buf);
+  p9_close(f);
   return 0;
+err:
+  puts("err");
+  return -1;
 }
 
 static int
 cmd_write_fid(int argc, char **argv)
 {
-  return 0;
+  goto err;
+  if (argc < 2)
+    goto err;
+err:
+  puts("err");
+  return -1;
 }
 
 static int
 cmd_read(int argc, char **argv)
 {
+  P9_file *f;
+  char buf[1024];
+  int n;
+  if (argc < 2)
+    goto err;
+  f = p9_open(argv[1], P9_OREAD, -1, conn);
+  if (!f)
+    goto err;
+  while ((n = p9_read(sizeof(buf), buf, f)) > 0) {
+    printf("%d:", n);
+    fwrite(buf, 1, n, stdout);
+    puts("");
+  }
+  p9_close(f);
+  return 0;
+err:
+  puts("err");
+  return -1;
+}
+
+static int
+cmd_ls(int argc, char **argv)
+{
+  P9_file *f;
+  struct p9_stat stat;
+  char buf[1024];
+  int n;
+
+  f = p9_open((argc > 1) ? argv[1] : "/", P9_OREAD, -1, conn);
+  if (!f) {
+    puts("err");
+    return -1;
+  }
+  while (p9_readdir(&stat, f) > 0) {
+    n = snprintf(buf, sizeof(buf), "%x\t%llu\t%.*s%s",
+                 stat.mode, stat.length, stat.name_len, stat.name,
+                 ((stat.qid.type & P9_QTDIR) ? "/" : ""));
+    printf("%d:%s\n", n, buf);
+  }
+  puts("0:\n");
+  p9_close(f);
   return 0;
 }
 
-int
-process_stdin(struct p9_conn *conn)
+static int
+cmd_quit(int argc, char **argv)
+{
+  running = 0;
+  return 0;
+}
+
+static int
+process_stdin(void)
 {
   static char buf[1024];
   char *args[1024] = {0};
   int nargs, i;
 
-  log_printf(LOG_DBG, ";; process_stdin/\n");
-  while (fgets(buf, sizeof(buf), stdin)) {
+  printf("root: %u\n", p9_root_fid(conn));
+  log_printf(LOG_DBG, "; process_stdin/\n");
+  running = 1;
+  while (running && fgets(buf, sizeof(buf), stdin)) {
     nargs = parse_args(buf, NITEMS(args), args);
     if (nargs)
       for (i = 0; cmds[i].s; ++i)
         if (!strcmp(args[0], cmds[i].s) && cmds[i].fn)
-          cmds[i].fn(nargs - 1, args + 1);
+          cmds[i].fn(nargs, args);
   }
   return 0;
 }
@@ -120,7 +235,7 @@ process_command(int argc, char **argv)
         p9_attach(conn, user, res);
       else
         p9_set_root_fid(root_fid, conn);
-      ret = cmds[i].fn(argc - 1, argv + 1);
+      ret = cmds[i].fn(argc, argv);
       rm_p9conn(conn);
       break;
     }
@@ -162,7 +277,6 @@ int
 init_connection(char *host, int argc, char **argv)
 {
   char buf[16];
-  struct p9_conn *conn;
 
   fd = connect_to(host, port);
   if (fd < 0)
@@ -173,14 +287,14 @@ init_connection(char *host, int argc, char **argv)
     close(fd);
     die("Cannot set socket env variable");
   }
-  log_printf(LOG_DBG, ";; init_connection/ fd: %d\n", fd);
+  log_printf(LOG_DBG, "; init_connection/ fd: %d\n", fd);
   conn = mk_p9conn(fd, 1);
-  log_printf(LOG_DBG, ";; init_connection/ conn: %p\n", conn);
+  log_printf(LOG_DBG, "; init_connection/ conn: %p\n", conn);
   if (!conn || p9_attach(conn, user, res) == P9_NOTAG)
     die("Cannot init 9P connection");
-  log_printf(LOG_DBG, ";; init_connection/ argc: %d\n", argc);
+  log_printf(LOG_DBG, "; init_connection/ argc: %d\n", argc);
   if (argc == 0) {
-    process_stdin(conn);
+    process_stdin();
     rm_p9conn(conn);
   } else {
     rm_p9conn(conn);
@@ -199,7 +313,7 @@ main(int argc, char **argv)
                 "       9client [-s fd] filecmd...\n";
   char *sockdef;
   
-  logmask = 0xff;
+  logmask = 0xff & ~LOG_MSG;
   for (i = 1; i < argc && argv[i][0] == '-'; ++i)
     if (!strcmp(argv[i], "-p") && i + 1 < argc)
       port = atoi(argv[++i]);

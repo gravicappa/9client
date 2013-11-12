@@ -42,7 +42,8 @@ struct p9_file {
   int fid;
   int off;
   int buf_size;
-  int buf_read;
+  int buf_used;
+  int buf_off;
   unsigned char *buf;
   struct p9_conn *c;
 };
@@ -89,20 +90,27 @@ p9_io_send(struct p9_conn *c, void (*fn)(struct p9_conn *c, void *aux),
            void *aux)
 {
   struct p9_msg *m = &c->c.t;
-  int size, sent, r;
+  int size, sent = 0, r;
 
-  log_printf(LOG_DBG, "p9_io_send/\n");
+  log_printf(LOG_MSG, "; p9_io_send/\n");
   if (m->type == P9_TVERSION)
     m->tag = P9_NOTAG;
   else
     m->tag = p9_seq_next(c->tags);
   c->c.r.ename = 0;
   c->c.r.ename_len = 0;
-  if (p9_pack_msg(c->c.msize, (char *)c->outbuf, m))
+  if (logmask & LOG_MSG)
+    p9_print_msg(&c->c.t, "OUT");
+  if (p9_pack_msg(c->c.msize, (char *)c->outbuf, m)) {
+    log_printf(LOG_MSG, "; error packing message\n");
     return -1;
+  }
   size = unpack_uint4(c->outbuf);
+  log_printf(LOG_MSG, "; sent: %d size: %d\n", sent, size);
   for (sent = 0; sent < size; ) {
+    log_printf(LOG_MSG, "; (send %d)\n", size - sent);
     r = send(c->fd, c->outbuf + sent, size - sent, 0);
+    log_printf(LOG_MSG, "; send => %d\n", r);
     if (r <= 0)
       return -1;
     sent += r;
@@ -118,22 +126,22 @@ p9_io_recv(struct p9_conn *c, int wait_tag)
   struct p9_req *req;
   unsigned char *buf = c->inbuf;
 
-  log_printf(LOG_DBG, "p9_io_recv/ %d\n", wait_tag);
+  log_printf(LOG_MSG, "; p9_io_recv/ %d\n", wait_tag);
   s = c->insize;
   r = recv(c->fd, buf + s, c->c.msize - s, 0);
-  log_printf(LOG_DBG, "  recv => %d\n", r);
+  log_printf(LOG_MSG, ";  recv => %d\n", r);
   if (r == 0)
     return 1;
   if (r < 0)
     return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
   c->insize += r;
-  log_printf(LOG_DBG, "  insize: %d\n", c->insize);
+  log_printf(LOG_MSG, ";  insize: %d\n", c->insize);
   if (c->insize < 7)
     return 0;
   off = c->off;
   while (c->insize - off >= 7) {
     size = unpack_uint4(buf + off);
-    log_printf(LOG_DBG, "  msg.size: %d\n", size);
+    log_printf(LOG_MSG, ";  msg.size: %d\n", size);
     if (size < 7)
       return -1;
     if (off + size > c->insize)
@@ -141,14 +149,15 @@ p9_io_recv(struct p9_conn *c, int wait_tag)
     if (p9_unpack_msg(size, (char *)buf + off, &c->c.r))
       return -1;
     off += size;
-    log_printf(LOG_DBG, "  msg.type: %d\n", c->c.r.type);
+    if (logmask & LOG_MSG)
+      p9_print_msg(&c->c.r, "IN");
     /* TODO: handle incorrect response type */
     req = get_req(c->c.r.tag, c);
     if (req && req->fn)
       req->fn(c, req->aux);
     p9_seq_drop(c->c.r.tag, c->tags);
-    log_printf(LOG_DBG, "  msg.tag: %d\n", c->c.r.tag);
-    log_printf(LOG_DBG, "  wait_tag: %d\n", wait_tag);
+    log_printf(LOG_MSG, ";  msg.tag: %d\n", c->c.r.tag);
+    log_printf(LOG_MSG, ";  wait_tag: %d\n", wait_tag);
     if (c->c.r.tag == wait_tag)
       break;
   }
@@ -174,13 +183,11 @@ io_sendrecv(struct p9_conn *c)
 static int
 p9_version(struct p9_conn *c)
 {
-  log_printf(LOG_DBG, "p9_version/\n");
   c->c.t.type = P9_TVERSION;
   c->c.t.msize = c->c.msize;
   P9_SET_STR(c->c.t.version, "9P2000");
   if (io_sendrecv(c))
     return -1;
-  log_printf(LOG_DBG, "  => xxx\n");
   c->c.msize = ((c->c.msize < c->c.r.msize)
                     ? c->c.msize
                     : c->c.r.msize);
@@ -193,18 +200,16 @@ p9_version(struct p9_conn *c)
 int
 p9_attach(struct p9_conn *c, char *user, char *res)
 {
-  log_printf(LOG_DBG, "p9_attach/\n");
   c->c.t.type = P9_TATTACH;
   if (c->root_fid != P9_NOFID)
     p9fid_close(c->root_fid, c);
-  c->root_fid = p9_seq_next(c->tags);
+  c->root_fid = p9_seq_next(c->fids);
   c->c.t.fid = c->root_fid;
   c->c.t.afid = P9_NOFID;
   P9_SET_STR(c->c.t.uname, user);
   P9_SET_STR(c->c.t.aname, res);
   if (io_sendrecv(c))
     return P9_NOFID;
-  log_printf(LOG_DBG, "root_fid: %u/\n", c->root_fid);
   return c->root_fid;
 }
 
@@ -288,31 +293,39 @@ p9fid_walk(unsigned int newfid, unsigned int fid, const char *path,
            struct p9_conn *c)
 {
   struct p9_msg *r = &c->c.r, *m = &c->c.t;
-  int i, len, n, off;
+  int i = 0, len, n, off;
+  char *p;
 
   m->type = P9_TWALK;
-  i = off = 0;
   m->fid = fid;
   m->newfid = newfid;
   for (; path[i] == '/'; ++i) {}
+  off = i;
   do {
-    for (n = 0; path[i] && n < P9_MAXWELEM; ++i)
-      if (path[i] == '/') {
-        for (; path[i] == '/'; ++i) {}
+    for (n = 0; n < P9_MAXWELEM; ++i) {
+      if (path[i] == '/' || path[i] == 0) {
         len = i - off;
-        printf("path item[%d]: '%.*s'\n", n, len, path + off);
-        m->wname[n] = (char *)path + off;
-        m->wname_len[n] = len;
-        off = i + 1;
-        ++n;
+        if (len) {
+          m->wname[n] = (char *)path + off;
+          m->wname_len[n] = len;
+          ++n;
+        }
+        for (; path[i] == '/'; ++i) {}
+        off = i;
+        if (!path[i])
+          break;
       }
+    }
     m->nwname = n;
     if (io_sendrecv(c))
       return -1;
     if (r->ename)
       return -1;
-    if (r->nwqid < n)
-      return (m->wname[r->nwqid - 1] - path) + m->wname_len[r->nwqid - 1];
+    if (r->nwqid < n) {
+      p = m->wname[r->nwqid - 1] + m->wname_len[r->nwqid - 1];
+      for (; *p == '/'; ++p) {}
+      return p - path;
+    }
     m->fid = newfid;
   } while (path[i]);
   return i;
@@ -418,16 +431,17 @@ p9_walk(const char *path, unsigned int root_fid, struct p9_conn *c,
 
   f = p9_seq_next(c->fids);
   r = p9fid_walk(f, root_fid, path, c);
-  if (r < 0) {
-    p9_seq_drop(f, c->fids);
-    return -1;
+  if (r >= 0) {
+    if (path[r])
+      p9_seq_drop(f, c->fids);
+    else
+      *fid = f;
   }
-  *fid = f;
   return r;
 }
 
 
-P9_File
+P9_file
 p9_open(const char *path, int mode, unsigned int root_fid, struct p9_conn *c)
 {
   struct p9_file *f;
@@ -435,41 +449,50 @@ p9_open(const char *path, int mode, unsigned int root_fid, struct p9_conn *c)
   int r;
 
   r = p9_walk(path, root_fid, c, &fid);
-  if (r < 0)
-    goto err;
-  if (path[r])
-    goto err;
+  if (r < 0 || path[r])
+    return 0;
   if (p9fid_open(fid, mode, c))
     goto err;
   f = calloc(1, sizeof(struct p9_file));
-  if (f)
+  if (f) {
     f->fid = fid;
-  return (P9_File)f;
+    f->c = c;
+  }
+  return (P9_file)f;
 err:
   p9fid_close(fid, c);
   return 0;
 }
 
-P9_File
+P9_file
 p9_create(const char *path, int mode, int perm, unsigned int root_fid,
           struct p9_conn *c)
 {
   struct p9_file *f;
   unsigned int fid;
   int i, r;
+  char *dir = 0;
 
   r = p9_walk(path, root_fid, c, &fid);
   if (r < 0 || !path[r])
-    goto err;
-  for (i = r; path[i] && path[i] == '/'; ++i) {}
-  if (path[i])
-    goto err;
+    return 0;
+  dir = malloc(r);
+  if (!dir)
+    return 0;
+  memcpy(dir, path, r);
+  dir[r] = 0;
+  r = p9_walk(dir, root_fid, c, &fid);
+  free(dir);
+  if (dir[r])
+    return 0;
   if (p9fid_create(fid, path + r, mode, perm, c))
     goto err;
   f = calloc(1, sizeof(struct p9_file));
-  if (f)
+  if (f) {
     f->fid = fid;
-  return (P9_File)f;
+    f->c = c;
+  }
+  return (P9_file) f;
 err:
   p9fid_close(fid, c);
   return 0;
@@ -478,7 +501,7 @@ err:
 int
 p9_mkdir(const char *path, int perm, struct p9_conn *c)
 {
-  P9_File dir;
+  P9_file dir;
 
   dir = p9_create(path, 0, P9_DMDIR | perm, P9_NOFID, c);
   if (!dir)
@@ -488,7 +511,7 @@ p9_mkdir(const char *path, int perm, struct p9_conn *c)
 }
 
 void
-p9_close(P9_File file)
+p9_close(P9_file file)
 {
   struct p9_file *f = file;
   if (f) {
@@ -500,7 +523,7 @@ p9_close(P9_File file)
 }
 
 int
-p9_write(int len, void *data, P9_File file)
+p9_write(int len, void *data, P9_file file)
 {
   struct p9_file *f = file;
   int r;
@@ -514,7 +537,7 @@ p9_write(int len, void *data, P9_File file)
 }
 
 int
-p9_read(int len, void *data, P9_File file)
+p9_read(int len, void *data, P9_file file)
 {
   struct p9_file *f = file;
   int r;
@@ -532,23 +555,27 @@ p9_readstat(struct p9_stat *entry, struct p9_file *f)
 {
   unsigned int size;
   size = f->buf[0] | (f->buf[1] << 8);
-  if (size + 2 > f->buf_read)
+  if (size + 2 > f->buf_used)
     return 1;
   if (p9_unpack_stat(size + 2, (char *)f->buf, entry))
     return -1;
-  memmove(f->buf, f->buf + size + 2, f->buf_read - size - 2);
-  f->buf_read -= size + 2;
+  f->buf_off = size + 2;
   return 0;
 }
 
 int
-p9_readdir(struct p9_stat *entry, P9_File file)
+p9_readdir(struct p9_stat *entry, P9_file file)
 {
   struct p9_file *f = file;
   int r;
   if (!f)
     return -1;
   if (f->buf) {
+    if (f->buf_off) {
+      memmove(f->buf, f->buf + f->buf_off, f->buf_used - f->buf_off);
+      f->buf_used -= f->buf_off;
+      f->buf_off = 0;
+    }
     switch (p9_readstat(entry, f)) {
     case -1: return -1;
     case 0: return entry->size + 2;
@@ -556,15 +583,15 @@ p9_readdir(struct p9_stat *entry, P9_File file)
     }
   } else {
     f->buf_size = f->c->c.msize;
-    f->buf_read = 0;
+    f->buf_used = f->buf_off = 0;
     f->buf = malloc(f->buf_size);
     if (!f->buf)
       return -1;
   }
-  r = p9fid_read(f->fid, f->off, f->buf_size - f->buf_read,
-                 f->buf + f->buf_read, f->c);
+  r = p9_read(f->buf_size - f->buf_used, f->buf + f->buf_used, f);
   if (r < 0)
     return -1;
+  f->buf_used += r;
   switch (p9_readstat(entry, f)) {
   case -1: return -1;
   case 0: return entry->size + 2;
@@ -574,14 +601,14 @@ p9_readdir(struct p9_stat *entry, P9_File file)
 }
 
 int
-p9_tell(P9_File file)
+p9_tell(P9_file file)
 {
   struct p9_file *f = file;
   return (f) ? f->off : 0;
 }
 
 int
-p9_seek(P9_File file, int off, int whence)
+p9_seek(P9_file file, int off, int whence)
 {
   struct p9_file *f = file;
   int prev;

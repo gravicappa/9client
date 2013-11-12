@@ -82,8 +82,10 @@ p9_seq_next(struct p9_seq *seq)
 void
 p9_seq_drop(unsigned int x, struct p9_seq *seq)
 {
-  seq->last = x;
-  seq->pool[x >> 5] &= ~(1 << (x & 31));
+  if ((x >> 5) < seq->size) {
+    seq->last = x;
+    seq->pool[x >> 5] &= ~(1 << (x & 31));
+  }
 }
 
 int

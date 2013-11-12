@@ -1,6 +1,6 @@
 struct p9_conn;
 struct p9_stat;
-typedef void *P9_File;
+typedef void *P9_file;
 
 struct p9_conn *mk_p9conn(int fd, int init);
 void rm_p9conn(struct p9_conn *c);
@@ -26,17 +26,17 @@ int p9fid_read(unsigned int fid, uint64_t off, int len, void *data,
                struct p9_conn *c);
 int p9fid_stat(unsigned int fid, struct p9_stat *stat, struct p9_conn *c);
 
-P9_File p9_open(const char *path, int mode, unsigned int root_fid,
+P9_file p9_open(const char *path, int mode, unsigned int root_fid,
                 struct p9_conn *c);
-P9_File p9_create(const char *path, int mode, int perm, unsigned int root_fid,
+P9_file p9_create(const char *path, int mode, int perm, unsigned int root_fid,
                  struct p9_conn *c);
 int p9_mkdir(const char *path, int perm, struct p9_conn *c);
-void p9_close(P9_File f);
-int p9_write(int len, void *data, P9_File f);
-int p9_read(int len, void *data, P9_File f);
-int p9_readdir(struct p9_stat *entry, P9_File f);
-int p9_tell(P9_File f);
-int p9_seek(P9_File f, int mode, int seek);
+void p9_close(P9_file f);
+int p9_write(int len, void *data, P9_file f);
+int p9_read(int len, void *data, P9_file f);
+int p9_readdir(struct p9_stat *entry, P9_file f);
+int p9_tell(P9_file f);
+int p9_seek(P9_file f, int mode, int seek);
 
 int p9_io_send(struct p9_conn *c, void (*fn)(struct p9_conn *con, void *aux),
                void *aux);

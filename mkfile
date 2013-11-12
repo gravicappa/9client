@@ -7,7 +7,7 @@ CFLAGS = -O0 -g -Wall
 #LDFLAGS =
 O = .o
 
-obj = 9pmsg$O seq$O 9pconn$O util$O client$O
+obj = 9pmsg$O 9pdbg$O seq$O 9pconn$O util$O client$O
 
 $name: $obj
   $CC $CFLAGS $prereq $LDFLAGS -o $target
