@@ -3,7 +3,7 @@ struct p9_stat;
 typedef void *P9_file;
 
 struct p9_conn *mk_p9conn(int fd, int init);
-void rm_p9conn(struct p9_conn *c);
+void rm_p9conn(struct p9_conn *c, int clunk_root);
 
 int p9_attach(struct p9_conn *c, char *user, char *res);
 
@@ -14,6 +14,8 @@ void p9_set_root_fid(unsigned int root_fid, struct p9_conn *c);
 
 int p9fid_walk(unsigned int newfid, unsigned int fid, const char *path,
                struct p9_conn *c);
+int p9fid_walk2(const char *path, unsigned int fid, struct p9_conn *c,
+                unsigned int *newfid);
 int p9fid_open(unsigned int fid, int mode, struct p9_conn *c);
 void p9fid_close(unsigned int fid, struct p9_conn *c);
 int p9fid_create(unsigned int fid, const char *name, int mode, int perm,

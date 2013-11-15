@@ -226,6 +226,7 @@ mk_p9conn(int fd, int init)
   c->fids = mk_p9seq();
   c->outbuf = malloc(c->c.msize);
   c->inbuf = malloc(c->c.msize);
+  c->root_fid = P9_NOFID;
   if (!(c->tags && c->fids && c->outbuf && c->inbuf))
     goto err;
   if (init)
@@ -244,11 +245,11 @@ err:
 }
 
 void
-rm_p9conn(struct p9_conn *c)
+rm_p9conn(struct p9_conn *c, int clunk_root)
 {
   if (!c)
     return;
-  if (c->root_fid != P9_NOFID)
+  if (clunk_root && c->root_fid != P9_NOFID)
     p9fid_close(c->root_fid, c);
   /* TODO: free reqs, req_pool, */
   rm_p9seq(c->tags);
@@ -346,6 +347,8 @@ p9fid_open(unsigned int fid, int mode, struct p9_conn *c)
 void
 p9fid_close(unsigned int fid, struct p9_conn *c)
 {
+  if (fid == P9_NOFID)
+    return;
   c->c.t.type = P9_TCLUNK;
   c->c.t.fid = fid;
   io_sendrecv(c);
@@ -419,23 +422,24 @@ p9fid_stat(unsigned int fid, struct p9_stat *stat, struct p9_conn *c)
   return 0;
 }
 
-static int
-p9_walk(const char *path, unsigned int root_fid, struct p9_conn *c,
-        unsigned int *fid)
+int
+p9fid_walk2(const char *path, unsigned int fid, struct p9_conn *c,
+            unsigned int *newfid)
 {
   int r;
   unsigned int f;
 
-  if (root_fid == P9_NOFID || root_fid == -1)
-    root_fid = c->root_fid;
+  if (fid == P9_NOFID || fid == -1)
+    fid = c->root_fid;
 
+  *newfid = P9_NOFID;
   f = p9_seq_next(c->fids);
-  r = p9fid_walk(f, root_fid, path, c);
+  r = p9fid_walk(f, fid, path, c);
   if (r >= 0) {
     if (path[r])
       p9_seq_drop(f, c->fids);
     else
-      *fid = f;
+      *newfid = f;
   }
   return r;
 }
@@ -448,8 +452,8 @@ p9_open(const char *path, int mode, unsigned int root_fid, struct p9_conn *c)
   unsigned int fid;
   int r;
 
-  r = p9_walk(path, root_fid, c, &fid);
-  if (r < 0 || path[r])
+  r = p9fid_walk2(path, root_fid, c, &fid);
+  if (r < 0 || fid == P9_NOFID)
     return 0;
   if (p9fid_open(fid, mode, c))
     goto err;
@@ -470,20 +474,20 @@ p9_create(const char *path, int mode, int perm, unsigned int root_fid,
 {
   struct p9_file *f;
   unsigned int fid;
-  int i, r;
+  int r;
   char *dir = 0;
 
-  r = p9_walk(path, root_fid, c, &fid);
-  if (r < 0 || !path[r])
-    return 0;
+  r = p9fid_walk2(path, root_fid, c, &fid);
+  if (r < 0 || fid != P9_NOFID)
+    goto err;
   dir = malloc(r);
   if (!dir)
     return 0;
   memcpy(dir, path, r);
   dir[r] = 0;
-  r = p9_walk(dir, root_fid, c, &fid);
+  r = p9fid_walk2(dir, root_fid, c, &fid);
   free(dir);
-  if (dir[r])
+  if (fid == P9_NOFID)
     return 0;
   if (p9fid_create(fid, path + r, mode, perm, c))
     goto err;
