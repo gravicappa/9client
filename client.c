@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <netdb.h>
 #include <fcntl.h>
+#include <netinet/tcp.h>
 
 #include "9p.h"
 #include "9pconn.h"
@@ -292,7 +293,7 @@ connect_to(char *host, int port)
 {
   struct sockaddr_in addr;
   struct hostent *hostent;
-  int fd, flags;
+  int fd, x;
 
   hostent = gethostbyname(host);
   if (!hostent || (hostent->h_addrtype != AF_INET)) {
@@ -307,9 +308,11 @@ connect_to(char *host, int port)
     close(fd);
     return -1;
   }
+  x = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &x, sizeof(x));
   if (0) {
-    flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+    x = fcntl(fd, F_GETFL, 0);
+    if (x < 0 || fcntl(fd, F_SETFL, x | O_NONBLOCK) < 0) {
       fprintf(stderr, "Cannot make socket non-blocking\n");
       close(fd);
       return -1;

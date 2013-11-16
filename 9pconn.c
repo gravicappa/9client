@@ -92,7 +92,6 @@ p9_io_send(struct p9_conn *c, void (*fn)(struct p9_conn *c, void *aux),
   struct p9_msg *m = &c->c.t;
   int size, sent = 0, r;
 
-  log_printf(LOG_MSG, "; p9_io_send/\n");
   if (m->type == P9_TVERSION)
     m->tag = P9_NOTAG;
   else
@@ -101,16 +100,11 @@ p9_io_send(struct p9_conn *c, void (*fn)(struct p9_conn *c, void *aux),
   c->c.r.ename_len = 0;
   if (logmask & LOG_MSG)
     p9_print_msg(&c->c.t, "OUT");
-  if (p9_pack_msg(c->c.msize, (char *)c->outbuf, m)) {
-    log_printf(LOG_MSG, "; error packing message\n");
+  if (p9_pack_msg(c->c.msize, (char *)c->outbuf, m))
     return -1;
-  }
   size = unpack_uint4(c->outbuf);
-  log_printf(LOG_MSG, "; sent: %d size: %d\n", sent, size);
   for (sent = 0; sent < size; ) {
-    log_printf(LOG_MSG, "; (send %d)\n", size - sent);
     r = send(c->fd, c->outbuf + sent, size - sent, 0);
-    log_printf(LOG_MSG, "; send => %d\n", r);
     if (r <= 0)
       return -1;
     sent += r;
@@ -122,26 +116,24 @@ p9_io_send(struct p9_conn *c, void (*fn)(struct p9_conn *c, void *aux),
 int
 p9_io_recv(struct p9_conn *c, int wait_tag)
 {
-  int r, s, off, size;
+  int r, off, size;
   struct p9_req *req;
   unsigned char *buf = c->inbuf;
 
-  log_printf(LOG_MSG, "; p9_io_recv/ %d\n", wait_tag);
-  s = c->insize;
-  r = recv(c->fd, buf + s, c->c.msize - s, 0);
-  log_printf(LOG_MSG, ";  recv => %d\n", r);
+  if (c->insize) {
+    memmove(buf, buf + c->insize, c->c.msize - c->insize);
+    c->off -= c->insize;
+    c->insize = 0;
+  }
+  r = recv(c->fd, buf + c->off, c->c.msize - c->off, 0);
   if (r == 0)
-    return 1;
+    return -1;
   if (r < 0)
     return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
   c->insize += r;
-  log_printf(LOG_MSG, ";  insize: %d\n", c->insize);
-  if (c->insize < 7)
-    return 0;
   off = c->off;
   while (c->insize - off >= 7) {
     size = unpack_uint4(buf + off);
-    log_printf(LOG_MSG, ";  msg.size: %d\n", size);
     if (size < 7)
       return -1;
     if (off + size > c->insize)
@@ -156,8 +148,6 @@ p9_io_recv(struct p9_conn *c, int wait_tag)
     if (req && req->fn)
       req->fn(c, req->aux);
     p9_seq_drop(c->c.r.tag, c->tags);
-    log_printf(LOG_MSG, ";  msg.tag: %d\n", c->c.r.tag);
-    log_printf(LOG_MSG, ";  wait_tag: %d\n", wait_tag);
     if (c->c.r.tag == wait_tag)
       break;
   }
@@ -406,8 +396,9 @@ p9fid_read(unsigned int fid, uint64_t off, int len, void *data,
   m->count = len;
   if (io_sendrecv(c) || c->c.r.ename)
     return -1;
-  memcpy(data, c->c.r.data, c->c.r.count);
-  return c->c.r.count;
+  len = (len < c->c.r.count) ? len : c->c.r.count;
+  memcpy(data, c->c.r.data, len);
+  return len;
 }
 
 int
@@ -480,7 +471,7 @@ p9_create(const char *path, int mode, int perm, unsigned int root_fid,
   r = p9fid_walk2(path, root_fid, c, &fid);
   if (r < 0 || fid != P9_NOFID)
     goto err;
-  dir = malloc(r);
+  dir = malloc(r + 1);
   if (!dir)
     return 0;
   memcpy(dir, path, r);
@@ -576,8 +567,8 @@ p9_readdir(struct p9_stat *entry, P9_file file)
     return -1;
   if (f->buf) {
     if (f->buf_off) {
-      memmove(f->buf, f->buf + f->buf_off, f->buf_used - f->buf_off);
       f->buf_used -= f->buf_off;
+      memmove(f->buf, f->buf + f->buf_off, f->buf_used);
       f->buf_off = 0;
     }
     switch (p9_readstat(entry, f)) {

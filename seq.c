@@ -2,6 +2,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#include "util.h"
+
 struct p9_seq {
   int size;
   int last;
@@ -72,9 +74,10 @@ p9_seq_next(struct p9_seq *seq)
   if (i >= n) {
     j = 0;
     i = n;
-    if (expand_pool(seq, 1))
+    if (expand_pool(seq, seq->size + 1))
       return -1;
   }
+  /*log_printf(LOG_UI, "seq/ next i: %d size: %d\n", i, seq->size);*/
   seq->pool[i] |= (1 << j);
   return (i << 5) + j;
 }

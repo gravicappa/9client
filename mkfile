@@ -1,6 +1,6 @@
 MKSHELL = rc
 
-name = 9client
+name = client
 
 CC = gcc
 CFLAGS = -O0 -g -Wall
