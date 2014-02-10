@@ -27,6 +27,7 @@ struct p9_conn {
   int outsize;
   int insize;
   int off;
+  int logmask;
   unsigned char *outbuf;
   unsigned char *inbuf;
   struct p9_req *req[256];
@@ -98,7 +99,7 @@ p9_io_send(struct p9_conn *c, void (*fn)(struct p9_conn *c, void *aux),
     m->tag = p9_seq_next(c->tags);
   c->c.r.ename = 0;
   c->c.r.ename_len = 0;
-  if (logmask & LOG_MSG)
+  if (c->logmask)
     p9_print_msg(&c->c.t, "OUT");
   if (p9_pack_msg(c->c.msize, (char *)c->outbuf, m))
     return -1;
@@ -116,42 +117,46 @@ p9_io_send(struct p9_conn *c, void (*fn)(struct p9_conn *c, void *aux),
 int
 p9_io_recv(struct p9_conn *c, int wait_tag)
 {
-  int r, off, size;
+  int r, off, size, run = 1;
   struct p9_req *req;
   unsigned char *buf = c->inbuf;
 
-  if (c->insize) {
-    memmove(buf, buf + c->insize, c->c.msize - c->insize);
-    c->off -= c->insize;
-    c->insize = 0;
-  }
-  r = recv(c->fd, buf + c->off, c->c.msize - c->off, 0);
-  if (r == 0)
-    return -1;
-  if (r < 0)
-    return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
-  c->insize += r;
-  off = c->off;
-  while (c->insize - off >= 7) {
-    size = unpack_uint4(buf + off);
-    if (size < 7)
+  while (run) {
+    if (c->insize) {
+      memmove(buf, buf + c->insize, c->c.msize - c->insize);
+      c->off -= c->insize;
+      c->insize = 0;
+    }
+    r = recv(c->fd, buf + c->off, c->c.msize - c->off, 0);
+    if (r == 0)
       return -1;
-    if (off + size > c->insize)
-      break;
-    if (p9_unpack_msg(size, (char *)buf + off, &c->c.r))
-      return -1;
-    off += size;
-    if (logmask & LOG_MSG)
-      p9_print_msg(&c->c.r, "IN");
-    /* TODO: handle incorrect response type */
-    req = get_req(c->c.r.tag, c);
-    if (req && req->fn)
-      req->fn(c, req->aux);
-    p9_seq_drop(c->c.r.tag, c->tags);
-    if (c->c.r.tag == wait_tag)
-      break;
+    if (r < 0)
+      return (errno == EAGAIN || errno == EWOULDBLOCK) ? 0 : -1;
+    c->insize += r;
+    off = c->off;
+    while (c->insize - off >= 7) {
+      size = unpack_uint4(buf + off);
+      if (size < 7)
+        return -1;
+      if (off + size > c->insize)
+        break;
+      if (p9_unpack_msg(size, (char *)buf + off, &c->c.r))
+        return -1;
+      off += size;
+      if (c->logmask)
+        p9_print_msg(&c->c.r, "IN");
+      /* TODO: handle incorrect response type */
+      req = get_req(c->c.r.tag, c);
+      if (req && req->fn)
+        req->fn(c, req->aux);
+      p9_seq_drop(c->c.r.tag, c->tags);
+      if (c->c.r.tag == wait_tag) {
+        run = 0;
+        break;
+      }
+    }
+    c->off = off;
   }
-  c->off = off;
   return 1;
 }
 
@@ -162,11 +167,9 @@ io_sendrecv(struct p9_conn *c)
   tag = p9_io_send(c, 0, 0);
   if (tag < 0)
     return -1;
-  do {
-    r = p9_io_recv(c, tag);
-    if (r < 0)
-      return -1;
-  } while (!r);
+  r = p9_io_recv(c, tag);
+  if (r < 0)
+    return -1;
   return 0;
 }
 
@@ -178,9 +181,7 @@ p9_version(struct p9_conn *c)
   P9_SET_STR(c->c.t.version, "9P2000");
   if (io_sendrecv(c))
     return -1;
-  c->c.msize = ((c->c.msize < c->c.r.msize)
-                    ? c->c.msize
-                    : c->c.r.msize);
+  c->c.msize = (c->c.msize < c->c.r.msize) ? c->c.msize : c->c.r.msize;
   if (strcmp(c->c.r.version, "9P2000"))
     return -1;
   c->root_fid = P9_NOFID;
